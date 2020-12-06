@@ -1,0 +1,22 @@
+mqtt_url: mqtt://192.168.1.2/
+
+recordings_dir: /home/pi/km/recordings
+
+recording_cmd: >
+        arecord -D plughw:1,0 --channels 1 --format S16_LE --rate 16000 --buffer-size 1024 --file-type raw
+        # arecord --channels 1 --format S16_LE --rate 16000 --buffer-size 1024 --file-type raw
+
+playback_cmd: >
+        aplay $wav_path
+
+normalize_cmd: >
+        sox --norm "$wav_path" /tmp/sox.wav; mv /tmp/sox.wav "$wav_path"
+        #sox "$wav_path" /tmp/sox.wav noisered noise.prof 0.0001 norm;  mv /tmp/sox.wav "$wav_path"
+        #sox --norm "$wav_path" /tmp/sox.wav;  mv /tmp/sox.wav "$wav_path"
+
+myself: teddy
+
+people:
+- name: teddy
+  led_pin: 22
+  button_pin: 23
