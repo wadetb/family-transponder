@@ -1,9 +1,10 @@
 mqtt_url: mqtt://192.168.1.2/
 
-recordings_dir: /home/pi/km/recordings
+recordings_dir: /home/pi/ft/recordings
 
 recording_cmd: >
         arecord -D plughw:1,0 --channels 1 --format S16_LE --rate 16000 --buffer-size 1024 --file-type raw
+        # arecord -D plughw:1,0
         # arecord --channels 1 --format S16_LE --rate 16000 --buffer-size 1024 --file-type raw
 
 playback_cmd: >
@@ -18,5 +19,6 @@ myself: teddy
 
 people:
 - name: teddy
+  pixel: 0
   led_pin: 22
   button_pin: 23

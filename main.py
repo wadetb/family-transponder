@@ -11,12 +11,26 @@ import time
 from time import sleep
 import wave
 
-from gpiozero import LED, Button
-import paho.mqtt.client as mqtt
+import board
+import neopixel
+from gpiozero import Button
+# import paho.mqtt.client as mqtt
 import yaml
 
 
-Person = collections.namedtuple('Person', ['name', 'led', 'button'])
+import firebase_admin
+from firebase_admin import credentials, firestore
+
+print('FIREBASE')
+cred = credentials.Certificate("family-transponder-firebase-adminsdk-xr75d-da4523c013.json")
+firebase_admin.initialize_app(cred)
+firestore_db = firestore.client()
+print('FIREBASE_DONE')
+
+pixels = neopixel.NeoPixel(board.D12, 10)
+pixels[0] = (0, 0, 0)
+
+Person = collections.namedtuple('Person', ['name', 'pixel', 'button'])
 
 
 class Config:
@@ -40,32 +54,34 @@ class MessageClient:
         self.config = Config('config.yaml')
         self.state = {'mode': 'idle', 'suggestions': []}
 
-        self.client = mqtt.Client()
+        # self.client = mqtt.Client()
 
-        self.people = [Person(p['name'], LED(p['led_pin']), Button(p['button_pin'])) for p in self.config.people]
+        self.people = [Person(p['name'], p['pixel'], Button(p['button_pin'])) for p in self.config.people]
 
+    # def on_connect(self, _client, _userdata, _flags, rc):
+    #     print('CONNECT', rc)
+    #     self.client.subscribe('km/{}'.format(self.config.myself))
 
-    def on_connect(self, _client, _userdata, _flags, rc):
-        print('CONNECT', rc)
-        self.client.subscribe('km/{}'.format(self.config.myself))
+    # def on_message(self, _client, _userdata, msg):
+    #     packet = json.loads(msg.payload.decode())
+    #     print('RECV', msg.topic, json.dumps(packet)[:100])
+    #     if packet['code'] == 'message':
+    #         recording_path = self.encode_path(datetime.datetime.now(), packet['from'], self.config.myself)
+    #         data = base64.b64decode(packet['buffer'])
+    #         self.save_wav(recording_path, bytes(data))
 
-    def on_message(self, _client, _userdata, msg):
-        packet = json.loads(msg.payload.decode())
-        print('RECV', msg.topic, json.dumps(packet)[:100])
-        if packet['code'] == 'message':
-            recording_path = self.encode_path(datetime.datetime.now(), packet['from'], self.config.myself)
-            data = base64.b64decode(packet['buffer'])
-            self.save_wav(recording_path, bytes(data))
-
-    def send(self, to, packet):
-        topic = 'km/{}'.format(to)
-        print('SEND', topic, json.dumps(packet)[:100])
-        self.client.publish(topic, json.dumps(packet))
+    # def send(self, to, packet):
+    #     topic = 'km/{}'.format(to)
+    #     print('SEND', topic, json.dumps(packet)[:100])
+    #     self.client.publish(topic, json.dumps(packet))
 
     def encode_path(self, timestamp, person_from, person_to):
         return pathlib.Path(self.config.recordings_dir) / f'{timestamp:%Y%m%d%H%M%S}-from-{person_from}-to-{person_to}.wav'
 
     def save_wav(self, wav_path, content):
+        # w = open(wav_path, 'wb')
+        # w.write(content)
+        # w.close()
         w = wave.open(str(wav_path), 'wb')
         w.setnchannels(1)
         w.setsampwidth(2)
@@ -99,28 +115,29 @@ class MessageClient:
         normalize_cmd = self.config.normalize_cmd.replace('$wav_path', str(recording_path))
         subprocess.run(normalize_cmd, shell=True, check=True)
 
-        # playback_cmd = self.config.playback_cmd.replace('$wav_path', str(recording_path))
-        # subprocess.run(playback_cmd, shell=True, check=True)
+        # playback_cmd = self.config.playback_cmd.replace('$wav_path', 'noise-audio.wav')
+        playback_cmd = self.config.playback_cmd.replace('$wav_path', str(recording_path))
+        subprocess.run(playback_cmd, shell=True, check=True)
 
-        self.send(person.name, {'code': 'message', 'from': self.config.myself, 'buffer': base64.b64encode(bytes(data)).decode('ascii')})
+        # self.send(person.name, {'code': 'message', 'from': self.config.myself, 'buffer': base64.b64encode(bytes(data)).decode('ascii')})
 
     def serve(self):
         print('STARTUP')
 
-        print('CONNECTING', self.config.mqtt_url)
-        self.client.on_connect = self.on_connect
-        self.client.on_message = self.on_message
-        self.client.connect(self.config.mqtt_url[7:-1])
-        self.client.loop_start()
+        # print('CONNECTING', self.config.mqtt_url)
+        # self.client.on_connect = self.on_connect
+        # self.client.on_message = self.on_message
+        # self.client.connect(self.config.mqtt_url[7:-1])
+        # self.client.loop_start()
 
         while True:
             for person in self.people:
                 if person.button.is_pressed:
                     print('BUTTON_PRESSED', person.name)
-                    person.led.on()
+                    pixels[person.pixel] = (255, 0, 0)
                     print('LED_ON', person.name)
                     self.send_message(person)
-                    person.led.off()
+                    pixels[person.pixel] = (0, 0, 0)
                     print('LED_OFF', person.name)
 
             time.sleep(0.1)
