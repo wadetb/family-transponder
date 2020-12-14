@@ -1,0 +1,26 @@
+#!/bin/bash
+set -x
+
+if [[ "$USER" -ne "pi" ]]
+  then echo "Please do not run as root"
+  exit
+fi
+
+cd /home/pi/ft
+
+sudo /usr/bin/python3 blink.py &
+
+while ! systemctl status network-online.target; do
+    sleep 1
+done
+
+cd /home/pi/ft
+
+git pull
+
+if [ ! -f init_python_libs ]; then
+    touch init_python_libs
+    sudo python3 -m pip install gpiozero adafruit-blinka pyyaml firebase_admin
+fi
+
+sudo /usr/bin/python3 main.py

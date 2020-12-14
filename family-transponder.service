@@ -1,0 +1,15 @@
+[Unit]
+Description=Family Transponder
+Before=basic.target
+After=local-fs.target sysinit.target
+DefaultDependencies=no
+
+[Service]
+User=pi
+ExecStart=/usr/bin/bash /home/pi/ft/start
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=basic.target
+

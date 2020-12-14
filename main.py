@@ -1,10 +1,7 @@
 #!/usr/bin/python3
-import base64
 import collections
-import datetime
 import platform
 import subprocess
-import sys
 import time
 import wave
 
@@ -20,8 +17,10 @@ cred = credentials.Certificate("family-transponder-firebase-adminsdk-xr75d-da452
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
+subprocess.run("touch blink_stop", shell=True, check=True)
+time.sleep(1)
+
 pixels = neopixel.NeoPixel(board.D12, 10)
-pixels[0] = (0, 0, 0)
 
 RECORDING_CMD = 'arecord -D plughw:1,0 --channels 1 --format S16_LE --rate 16000 --buffer-size 1024 --file-type raw'
 PLAYBACK_CMD = 'aplay /tmp/audio.wav'
@@ -167,7 +166,6 @@ class MessageClient:
                         pixels[mailbox.led_index] = (128, 128, 128)
                     else:
                         pixels[mailbox.led_index] = (0, 0, 0)
-
 
             time.sleep(0.1)
 
