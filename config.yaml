@@ -4,8 +4,6 @@ recordings_dir: /home/pi/ft/recordings
 
 recording_cmd: >
         arecord -D plughw:1,0 --channels 1 --format S16_LE --rate 16000 --buffer-size 1024 --file-type raw
-        # arecord -D plughw:1,0
-        # arecord --channels 1 --format S16_LE --rate 16000 --buffer-size 1024 --file-type raw
 
 playback_cmd: >
         aplay $wav_path

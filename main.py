@@ -2,86 +2,61 @@
 import base64
 import collections
 import datetime
-import json
-import pathlib
 import platform
 import subprocess
 import sys
 import time
-from time import sleep
 import wave
 
 import board
-import neopixel
 from gpiozero import Button
-# import paho.mqtt.client as mqtt
+import neopixel
 import yaml
-
 
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-print('FIREBASE')
 cred = credentials.Certificate("family-transponder-firebase-adminsdk-xr75d-da4523c013.json")
 firebase_admin.initialize_app(cred)
-firestore_db = firestore.client()
-print('FIREBASE_DONE')
+db = firestore.client()
 
 pixels = neopixel.NeoPixel(board.D12, 10)
 pixels[0] = (0, 0, 0)
 
-Person = collections.namedtuple('Person', ['name', 'pixel', 'button'])
+RECORDING_CMD = 'arecord -D plughw:1,0 --channels 1 --format S16_LE --rate 16000 --buffer-size 1024 --file-type raw'
+PLAYBACK_CMD = 'aplay /tmp/audio.wav'
+NORMALIZE_CMD = 'sox --norm /tmp/audio.wav /tmp/sox.wav; mv /tmp/sox.wav /tmp/audio.wav'
+
+Mailbox = collections.namedtuple('Mailbox', ['mailbox_id', 'led_index', 'button'])
 
 
-class Config:
-    def __init__(self, path):
-        self.load(path)
+class Mailbox:
+    def __init__(self, id, fields):
+        self.mailbox_id = id
+        self.led_index = fields['led_index']
+        self.button = Button(fields['button_pin'])
 
-    def load(self, path):
-        with open(path) as config_file:
-            self.fields = yaml.safe_load(config_file)
+        self.messages_ref = db.collection(u'mailboxes').document(id).collection('messages')
+        self.messages_ref.where(u'unread', '==', True).on_snapshot(self.on_messages_snapshot)
 
-        hostname = platform.node()
-        if hostname in self.fields:
-            self.fields.update(self.fields[hostname])
+        self.messages = []
 
-    def __getattr__(self, key):
-        return self.fields[key]
+    def on_messages_snapshot(self, snaps, changes, read_time):
+        self.messages = snaps
 
 
 class MessageClient:
     def __init__(self):
-        self.config = Config('config.yaml')
-        self.state = {'mode': 'idle', 'suggestions': []}
+        self.hostname = platform.node()
 
-        # self.client = mqtt.Client()
+        self.ref = db.collection(u'hosts').document(self.hostname)
 
-        self.people = [Person(p['name'], p['pixel'], Button(p['button_pin'])) for p in self.config.people]
+        self.mailboxes = {}
 
-    # def on_connect(self, _client, _userdata, _flags, rc):
-    #     print('CONNECT', rc)
-    #     self.client.subscribe('km/{}'.format(self.config.myself))
-
-    # def on_message(self, _client, _userdata, msg):
-    #     packet = json.loads(msg.payload.decode())
-    #     print('RECV', msg.topic, json.dumps(packet)[:100])
-    #     if packet['code'] == 'message':
-    #         recording_path = self.encode_path(datetime.datetime.now(), packet['from'], self.config.myself)
-    #         data = base64.b64decode(packet['buffer'])
-    #         self.save_wav(recording_path, bytes(data))
-
-    # def send(self, to, packet):
-    #     topic = 'km/{}'.format(to)
-    #     print('SEND', topic, json.dumps(packet)[:100])
-    #     self.client.publish(topic, json.dumps(packet))
-
-    def encode_path(self, timestamp, person_from, person_to):
-        return pathlib.Path(self.config.recordings_dir) / f'{timestamp:%Y%m%d%H%M%S}-from-{person_from}-to-{person_to}.wav'
+        for mailbox_snap in self.ref.collection('mailboxes').get():
+            self.mailboxes[mailbox_snap.id] = Mailbox(mailbox_snap.id, mailbox_snap.to_dict())
 
     def save_wav(self, wav_path, content):
-        # w = open(wav_path, 'wb')
-        # w.write(content)
-        # w.close()
         w = wave.open(str(wav_path), 'wb')
         w.setnchannels(1)
         w.setsampwidth(2)
@@ -90,55 +65,111 @@ class MessageClient:
         w.close()
         print('SAVED', wav_path)
 
-    def send_message(self, person):
-        print('START_RECORDING', person.name)
+    def send_message(self, mailbox):
+        print('RECORD', mailbox.mailbox_id)
+        to_mailboxes = { mailbox.mailbox_id }
+        pixels[mailbox.led_index] = (255, 0, 0)
+
         record_process = subprocess.Popen(
-            self.config.recording_cmd, shell=True, stdout=subprocess.PIPE)
+            RECORDING_CMD, shell=True, stdout=subprocess.PIPE)
 
         data = bytearray()
 
         while True:
             data.extend(record_process.stdout.read(1024 * 2))
-            if not person.button.is_pressed:
-                print('BUTTON_RELEASED')
+
+            for other_mailbox_id, other_mailbox in self.mailboxes.items():
+                if other_mailbox.button.is_pressed:
+                    if not other_mailbox_id in to_mailboxes:
+                        pixels[other_mailbox.led_index] = (255, 0, 0)
+                        to_mailboxes.add(other_mailbox_id)
+
+            if not mailbox.button.is_pressed:
                 break
 
         for _ in range(4):
-            # print('GET_EXTRA')
             data.extend(record_process.stdout.read(1024 * 2))
 
         record_process.terminate()
 
-        recording_path = self.encode_path(datetime.datetime.now(), self.config.myself, person.name)
-        self.save_wav(recording_path, bytes(data))
+        print('UPLOAD', mailbox.mailbox_id)
+        for to_mailbox_id in to_mailboxes:
+            to_mailbox = self.mailboxes[to_mailbox_id]
+            pixels[to_mailbox.led_index] = (128, 128, 0)
 
-        normalize_cmd = self.config.normalize_cmd.replace('$wav_path', str(recording_path))
-        subprocess.run(normalize_cmd, shell=True, check=True)
+        batch = db.batch()
+        
+        audio_ref = db.collection(u'audio').document()
+        batch.set(audio_ref, {
+            'timestamp': firestore.SERVER_TIMESTAMP,
+            'host': self.hostname,
+            'format': 'raw_s16le_22khz_mono',
+            'samples': bytes(data)
+        })
+        
+        for to_mailbox_id in to_mailboxes:
+            message_ref = db.collection(u'mailboxes').document(to_mailbox_id).collection('messages').document()
+            batch.set(message_ref, {
+                'timestamp': firestore.SERVER_TIMESTAMP,
+                'host': self.hostname,
+                'unread': True,
+                'audio_ref': audio_ref
+            })
 
-        # playback_cmd = self.config.playback_cmd.replace('$wav_path', 'noise-audio.wav')
-        playback_cmd = self.config.playback_cmd.replace('$wav_path', str(recording_path))
-        subprocess.run(playback_cmd, shell=True, check=True)
+        batch.commit()
 
-        # self.send(person.name, {'code': 'message', 'from': self.config.myself, 'buffer': base64.b64encode(bytes(data)).decode('ascii')})
+        for to_mailbox_id in to_mailboxes:
+            to_mailbox = self.mailboxes[to_mailbox_id]
+            pixels[to_mailbox.led_index] = (0, 0, 0)
+
+    def playback_message(self, mailbox):
+        print('PLAYBACK', mailbox.mailbox_id)
+
+        if len(mailbox.messages) == 0:
+            print('EMPTY')
+            return
+
+        message = mailbox.messages[0]
+        audio = message.get('audio_ref').get().to_dict()
+
+        self.save_wav('/tmp/audio.wav', audio['samples'])
+        subprocess.run(NORMALIZE_CMD, shell=True, check=True)
+        subprocess.run(PLAYBACK_CMD, shell=True, check=True)
+
+        mailbox.messages_ref.document(message.id).update({
+            'unread': False,
+        })
 
     def serve(self):
-        print('STARTUP')
-
-        # print('CONNECTING', self.config.mqtt_url)
-        # self.client.on_connect = self.on_connect
-        # self.client.on_message = self.on_message
-        # self.client.connect(self.config.mqtt_url[7:-1])
-        # self.client.loop_start()
+        print('SERVE')
 
         while True:
-            for person in self.people:
-                if person.button.is_pressed:
-                    print('BUTTON_PRESSED', person.name)
-                    pixels[person.pixel] = (255, 0, 0)
-                    print('LED_ON', person.name)
-                    self.send_message(person)
-                    pixels[person.pixel] = (0, 0, 0)
-                    print('LED_OFF', person.name)
+            for mailbox in self.mailboxes.values():
+                if mailbox.button.is_pressed:
+                    print('INITIATE', mailbox.mailbox_id)
+
+                    start = time.time()
+                    while mailbox.button.is_pressed:
+                        now = time.time()
+                        if now - start > 0.2:
+                            break
+                    
+                    if mailbox.button.is_pressed:
+                        print('HELD')
+                        self.send_message(mailbox)
+                    
+                    else:
+                        print('SHORT')
+                        self.playback_message(mailbox)
+
+                    print('FINISHED')
+                
+                else:
+                    if len(mailbox.messages) > 0:
+                        pixels[mailbox.led_index] = (128, 128, 128)
+                    else:
+                        pixels[mailbox.led_index] = (0, 0, 0)
+
 
             time.sleep(0.1)
 
