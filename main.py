@@ -67,7 +67,7 @@ class MessageClient:
 
     def send_message(self, mailbox):
         print('RECORD', mailbox.mailbox_id)
-        to_mailboxes = { mailbox.mailbox_id }
+        to_mailboxes = { mailbox }
         pixels[mailbox.led_index] = (255, 0, 0)
 
         record_process = subprocess.Popen(
@@ -78,11 +78,11 @@ class MessageClient:
         while True:
             data.extend(record_process.stdout.read(1024 * 2))
 
-            for other_mailbox_id, other_mailbox in self.mailboxes.items():
+            for other_mailbox in self.mailboxes.values():
                 if other_mailbox.button.is_pressed:
-                    if not other_mailbox_id in to_mailboxes:
+                    if not other_mailbox in to_mailboxes:
                         pixels[other_mailbox.led_index] = (255, 0, 0)
-                        to_mailboxes.add(other_mailbox_id)
+                        to_mailboxes.add(other_mailbox)
 
             if not mailbox.button.is_pressed:
                 break
@@ -93,8 +93,7 @@ class MessageClient:
         record_process.terminate()
 
         print('UPLOAD', mailbox.mailbox_id)
-        for to_mailbox_id in to_mailboxes:
-            to_mailbox = self.mailboxes[to_mailbox_id]
+        for to_mailbox in to_mailboxes:
             pixels[to_mailbox.led_index] = (128, 128, 0)
 
         batch = db.batch()
@@ -107,8 +106,8 @@ class MessageClient:
             'samples': bytes(data)
         })
         
-        for to_mailbox_id in to_mailboxes:
-            message_ref = db.collection(u'mailboxes').document(to_mailbox_id).collection('messages').document()
+        for to_mailbox in to_mailboxes:
+            message_ref = db.collection(u'mailboxes').document(to_mailbox.mailbox_id).collection('messages').document()
             batch.set(message_ref, {
                 'timestamp': firestore.SERVER_TIMESTAMP,
                 'host': self.hostname,
@@ -118,8 +117,7 @@ class MessageClient:
 
         batch.commit()
 
-        for to_mailbox_id in to_mailboxes:
-            to_mailbox = self.mailboxes[to_mailbox_id]
+        for to_mailbox in to_mailboxes:
             pixels[to_mailbox.led_index] = (0, 0, 0)
 
     def playback_message(self, mailbox):
