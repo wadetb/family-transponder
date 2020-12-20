@@ -8,7 +8,6 @@ import wave
 import board
 from gpiozero import Button
 import neopixel
-import yaml
 
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -41,6 +40,7 @@ class Mailbox:
         self.messages = []
 
     def on_messages_snapshot(self, snaps, changes, read_time):
+        print('ON_MESSAGES_SNAPSHOT', self.mailbox_id)
         self.messages = snaps
 
 

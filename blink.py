@@ -21,4 +21,8 @@ while not signal_file.exists():
 for i in range(0, 10):
     pixels[i] = (0, 0, 0)
 
-signal_file.unlink()
+try:
+    signal_file.unlink()
+except FileNotFoundError:
+    pass
+

@@ -10,7 +10,7 @@ cd /home/pi/ft
 
 sudo /usr/bin/python3 blink.py &
 
-while ! systemctl status network-online.target; do
+while ! systemctl --no-pager status network-online.target; do
     sleep 1
 done
 
@@ -20,7 +20,7 @@ git pull
 
 if [ ! -f init_python_libs ]; then
     touch init_python_libs
-    sudo python3 -m pip install gpiozero adafruit-blinka pyyaml firebase_admin
+    sudo python3 -m pip install gpiozero firebase_admin rpi_ws281x adafruit-circuitpython-neopixel
 fi
 
 sudo /usr/bin/python3 main.py
