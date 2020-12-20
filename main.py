@@ -2,6 +2,7 @@
 import collections
 import platform
 import subprocess
+import sys
 import time
 import wave
 
@@ -11,6 +12,8 @@ import neopixel
 
 import firebase_admin
 from firebase_admin import credentials, firestore
+
+VERSION = 1
 
 cred = credentials.Certificate("family-transponder-firebase-adminsdk-xr75d-da4523c013.json")
 firebase_admin.initialize_app(cred)
@@ -40,7 +43,7 @@ class Mailbox:
         self.messages = []
 
     def on_messages_snapshot(self, snaps, changes, read_time):
-        print('ON_MESSAGES_SNAPSHOT', self.mailbox_id)
+        print('MESSAGES', self.mailbox_id)
         self.messages = snaps
 
 
@@ -51,9 +54,16 @@ class MessageClient:
         self.ref = db.collection(u'hosts').document(self.hostname)
 
         self.mailboxes = {}
-
         for mailbox_snap in self.ref.collection('mailboxes').get():
             self.mailboxes[mailbox_snap.id] = Mailbox(mailbox_snap.id, mailbox_snap.to_dict())
+
+        self.new_version = False
+        db.collection('global').document('version').on_snapshot(self.on_version)
+
+    def on_version(self, snaps, changes, read_time):
+        latest_version = snaps[0].get('version')
+        print('LATEST_VERSION', latest_version, 'vs', VERSION)
+        self.new_version = latest_version != VERSION
 
     def save_wav(self, wav_path, content):
         w = wave.open(str(wav_path), 'wb')
@@ -166,6 +176,10 @@ class MessageClient:
                         pixels[mailbox.led_index] = (128, 128, 128)
                     else:
                         pixels[mailbox.led_index] = (0, 0, 0)
+
+            if self.new_version:
+                print('OTA_UPGRADE')
+                break
 
             time.sleep(0.1)
 
