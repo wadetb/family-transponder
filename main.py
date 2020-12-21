@@ -13,7 +13,7 @@ import neopixel
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-VERSION = 1
+VERSION = 2
 
 cred = credentials.Certificate("family-transponder-firebase-adminsdk-xr75d-da4523c013.json")
 firebase_admin.initialize_app(cred)
