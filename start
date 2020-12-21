@@ -16,8 +16,6 @@ done
 
 cd /home/pi/ft
 
-git pull
-
 if [ ! -f init_python_libs ]; then
     touch init_python_libs
     sudo python3 -m pip install gpiozero firebase_admin rpi_ws281x adafruit-circuitpython-neopixel

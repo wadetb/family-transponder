@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-import collections
 import platform
 import subprocess
 import sys
@@ -13,8 +12,6 @@ import neopixel
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-VERSION = 2
-
 cred = credentials.Certificate("family-transponder-firebase-adminsdk-xr75d-da4523c013.json")
 firebase_admin.initialize_app(cred)
 db = firestore.client()
@@ -27,8 +24,7 @@ pixels = neopixel.NeoPixel(board.D12, 10)
 RECORDING_CMD = 'arecord -D plughw:1,0 --channels 1 --format S16_LE --rate 16000 --buffer-size 1024 --file-type raw'
 PLAYBACK_CMD = 'aplay /tmp/audio.wav'
 NORMALIZE_CMD = 'sox --norm /tmp/audio.wav /tmp/sox.wav; mv /tmp/sox.wav /tmp/audio.wav'
-
-Mailbox = collections.namedtuple('Mailbox', ['mailbox_id', 'led_index', 'button'])
+DESCRIBE_CMD = 'git describe --always'
 
 
 class Mailbox:
@@ -56,6 +52,7 @@ class Mailbox:
 class MessageClient:
     def __init__(self):
         self.hostname = platform.node()
+        self.need_restart = False
 
         self.ref = db.collection(u'hosts').document(self.hostname)
 
@@ -63,13 +60,18 @@ class MessageClient:
         for mailbox_snap in self.ref.collection('mailboxes').get():
             self.mailboxes[mailbox_snap.id] = Mailbox(mailbox_snap.id, mailbox_snap.to_dict())
 
-        self.new_version = False
         db.collection('global').document('version').on_snapshot(self.on_version)
 
     def on_version(self, snaps, changes, read_time):
         latest_version = snaps[0].get('version')
-        print('LATEST_VERSION', latest_version, 'vs', VERSION)
-        self.new_version = latest_version != VERSION
+        local_version = subprocess.check_output(DESCRIBE_CMD, shell=True).decode().strip()
+        print('LATEST_VERSION', latest_version, 'vs', local_version)
+
+        if latest_version != local_version:
+            print('OTA_UPGRADE', latest_version)
+            subprocess.run('git fetch', shell=True)
+            subprocess.run(f'git checkout {latest_version}', shell=True)
+            self.need_restart = True
 
     def save_wav(self, wav_path, content):
         w = wave.open(str(wav_path), 'wb')
@@ -215,8 +217,8 @@ class MessageClient:
                     else:
                         pixels[mailbox.led_index] = (0, 0, 0)
 
-            if self.new_version:
-                print('OTA_UPGRADE')
+            if self.need_restart:
+                print('RESTART')
                 break
 
             time.sleep(0.1)
