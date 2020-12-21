@@ -37,13 +37,19 @@ class Mailbox:
         self.led_index = fields['led_index']
         self.button = Button(fields['button_pin'])
 
-        self.messages_ref = db.collection(u'mailboxes').document(id).collection('messages')
+        self.ref = db.collection(u'mailboxes').document(id)
+        self.pin = self.ref.get().to_dict()['pin']
+        self.last_unlock_time = None
+
+        print('MAILBOX', id, fields, 'PIN', self.pin)
+
+        self.messages_ref = self.ref.collection('messages')
         self.messages_ref.where(u'unread', '==', True).on_snapshot(self.on_messages_snapshot)
 
         self.messages = []
 
     def on_messages_snapshot(self, snaps, changes, read_time):
-        print('MESSAGES', self.mailbox_id)
+        print('MESSAGES', self.mailbox_id, len(snaps))
         self.messages = snaps
 
 
@@ -147,6 +153,38 @@ class MessageClient:
             'unread': False,
         })
 
+    def check_pin(self, mailbox):
+        print('CHECK_PIN', mailbox.mailbox_id, mailbox.pin)
+        pixels[mailbox.led_index] = (0, 0, 128)
+
+        if mailbox.last_unlock_time is not None:
+            time_since_last_unlock = time.time() - mailbox.last_unlock_time
+            if time_since_last_unlock < 60:
+                print('STILL_UNLOCKED')
+                return True
+
+        pin = 's'
+        while True:
+            start = time.time()
+            while not mailbox.button.is_pressed:
+                now = time.time()
+                if now - start > 2.0:
+                    return False
+
+            start = time.time()
+            while mailbox.button.is_pressed:
+                press_time = time.time() - start
+
+            if press_time >= 0.5:
+                pin += 'l'
+            else:
+                pin += 's'
+            
+            print('PIN', pin)
+            if pin == mailbox.pin:
+                mailbox.last_unlock_time = time.time()
+                return True
+
     def serve(self):
         print('SERVE')
 
@@ -166,8 +204,8 @@ class MessageClient:
                         self.send_message(mailbox)
                     
                     else:
-                        print('SHORT')
-                        self.playback_message(mailbox)
+                        if self.check_pin(mailbox):
+                            self.playback_message(mailbox)
 
                     print('FINISHED')
                 
