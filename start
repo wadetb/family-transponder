@@ -8,7 +8,7 @@ fi
 
 cd /home/pi/ft
 
-sudo /usr/bin/python3 blink.py &
+sudo /usr/bin/python3 -u blink.py &
 
 while ! systemctl --no-pager status network-online.target; do
     sleep 1
@@ -23,4 +23,4 @@ if [ ! -f init_python_libs ]; then
     sudo python3 -m pip install gpiozero firebase_admin rpi_ws281x adafruit-circuitpython-neopixel
 fi
 
-sudo /usr/bin/python3 main.py
+sudo /usr/bin/python3 -u main.py
