@@ -19,7 +19,7 @@ db = firestore.client()
 subprocess.run("touch blink_stop", shell=True, check=True)
 time.sleep(1)
 
-pixels = neopixel.NeoPixel(board.D12, 10)
+pixels = neopixel.NeoPixel(board.D12, 20)
 
 RECORDING_CMD = 'arecord -D plughw:1,0 --channels 1 --format S16_LE --rate 16000 --buffer-size 1024 --file-type raw'
 PLAYBACK_CMD = 'aplay /tmp/audio.wav'
@@ -28,10 +28,16 @@ DESCRIBE_CMD = 'git describe --always'
 
 
 class Mailbox:
+    ALL_BUTTONS = {}
+
     def __init__(self, id, fields):
         self.mailbox_id = id
         self.led_index = fields['led_index']
-        self.button = Button(fields['button_pin'])
+
+        button_pin = fields['button_pin']
+        if not button_pin in Mailbox.ALL_BUTTONS:
+            Mailbox.ALL_BUTTONS[button_pin] = Button(button_pin)
+        self.button = Mailbox.ALL_BUTTONS[button_pin]
 
         self.ref = db.collection(u'mailboxes').document(id)
         self.pin = self.ref.get().to_dict()['pin']
@@ -40,9 +46,12 @@ class Mailbox:
         print('MAILBOX', id, fields, 'PIN', self.pin)
 
         self.messages_ref = self.ref.collection('messages')
-        self.messages_ref.where(u'unread', '==', True).on_snapshot(self.on_messages_snapshot)
+        self.messages_watch = self.messages_ref.where(u'unread', '==', True).on_snapshot(self.on_messages_snapshot)
 
         self.messages = []
+
+    def __del__(self):
+        self.messages_watch.unsubscribe()
 
     def on_messages_snapshot(self, snaps, changes, read_time):
         print('MESSAGES', self.mailbox_id, len(snaps))
@@ -53,14 +62,22 @@ class MessageClient:
     def __init__(self):
         self.hostname = platform.node()
         self.need_restart = False
+        self.mailboxes = {}
 
         self.ref = db.collection(u'hosts').document(self.hostname)
-
-        self.mailboxes = {}
-        for mailbox_snap in self.ref.collection('mailboxes').get():
-            self.mailboxes[mailbox_snap.id] = Mailbox(mailbox_snap.id, mailbox_snap.to_dict())
+        self.ref.collection('mailboxes').on_snapshot(self.on_mailboxes)
 
         db.collection('global').document('version').on_snapshot(self.on_version)
+
+    def on_mailboxes(self, snap, changes, read_time):
+        for change in changes:
+            if change.type.name == 'ADDED':
+                self.mailboxes[change.document.id] = Mailbox(change.document.id, change.document.to_dict())
+            elif change.type.name == 'MODIFIED':
+                del self.mailboxes[change.document.id]
+                self.mailboxes[change.document.id] = Mailbox(change.document.id, change.document.to_dict())
+            elif change.type.name == 'REMOVED':
+                del self.mailboxes[change.document.id]
 
     def on_version(self, snaps, changes, read_time):
         latest_version = snaps[0].get('version')
@@ -95,7 +112,7 @@ class MessageClient:
         while True:
             data.extend(record_process.stdout.read(1024 * 2))
 
-            for other_mailbox in self.mailboxes.values():
+            for other_mailbox in list(self.mailboxes.values()):
                 if other_mailbox.button.is_pressed:
                     if not other_mailbox in to_mailboxes:
                         pixels[other_mailbox.led_index] = (255, 0, 0)
@@ -174,6 +191,7 @@ class MessageClient:
                     return False
 
             start = time.time()
+            press_time = 0
             while mailbox.button.is_pressed:
                 press_time = time.time() - start
 
@@ -191,7 +209,7 @@ class MessageClient:
         print('SERVE')
 
         while True:
-            for mailbox in self.mailboxes.values():
+            for mailbox in list(self.mailboxes.values()):
                 if mailbox.button.is_pressed:
                     print('INITIATE', mailbox.mailbox_id)
 
