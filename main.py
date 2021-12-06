@@ -1,9 +1,12 @@
 #!/usr/bin/python3
+import logging
 import platform
 import subprocess
 import sys
+import threading
 import time
 import wave
+import zlib
 
 import board
 from gpiozero import Button
@@ -12,62 +15,262 @@ import neopixel
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-cred = credentials.Certificate("family-transponder-firebase-adminsdk-xr75d-da4523c013.json")
-firebase_admin.initialize_app(cred)
-db = firestore.client()
+def wait():
+    time.sleep(0.1)
 
-subprocess.run("touch blink_stop", shell=True, check=True)
-time.sleep(1)
 
-pixels = neopixel.NeoPixel(board.D12, 20)
+def save_wav(wav_path, content):
+    w = wave.open(str(wav_path), 'wb')
+    w.setnchannels(1)
+    w.setsampwidth(2)
+    w.setframerate(16000)
+    w.writeframes(content)
+    w.close()
+    logging.info(f'SAVED {wav_path}')
 
-RECORDING_CMD = 'arecord -D plughw:1,0 --channels 1 --format S16_LE --rate 16000 --buffer-size 1024 --file-type raw'
-PLAYBACK_CMD = 'aplay /tmp/audio.wav'
-NORMALIZE_CMD = 'sox --norm /tmp/audio.wav /tmp/sox.wav; mv /tmp/sox.wav /tmp/audio.wav'
-DESCRIBE_CMD = 'git describe --always'
+
+class Service:
+    def __init__(self):
+        logging.basicConfig(level=logging.INFO)
+        logging.info('STARTUP')
+
+        cred = credentials.Certificate("family-transponder-firebase-adminsdk-xr75d-da4523c013.json")
+        firebase_admin.initialize_app(cred)
+
+        self.db = firestore.client()
+        self.audio_collection = self.db.collection(u'audio')
+
+        subprocess.run("touch blink_stop", shell=True, check=True)
+        time.sleep(1)
+
+        self.pixels = neopixel.NeoPixel(board.D12, 20)
+        self.buttons = {}
+
+        self.hostname = platform.node()
+        self.quit_requested = False
+
+
+class Recorder:
+    def __init__(self):
+        self.mailboxes = set()
+
+        self.thread = threading.Thread(target=self.run)
+        self.thread.start()
+
+    def run(self):
+        cmd = 'arecord -D plughw:1,0 --channels 1 --format S16_LE --rate 16000 --buffer-size 4096 --file-type raw'
+
+        record_process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE)
+
+        while not service.quit_requested:
+            data = record_process.stdout.read(4096 * 2)
+
+            for mailbox in self.mailboxes:
+                mailbox.recorded.append(data)
 
 
 class Mailbox:
-    ALL_BUTTONS = {}
-
     def __init__(self, id, fields):
+        logging.info(f'MAILBOX {id} {fields}')
+
         self.mailbox_id = id
         self.led_index = fields['led_index']
 
         button_pin = fields['button_pin']
-        if not button_pin in Mailbox.ALL_BUTTONS:
-            Mailbox.ALL_BUTTONS[button_pin] = Button(button_pin)
-        self.button = Mailbox.ALL_BUTTONS[button_pin]
+        if not button_pin in service.buttons:
+            service.buttons[button_pin] = Button(button_pin)
+        self.button = service.buttons[button_pin]
 
-        self.ref = db.collection(u'mailboxes').document(id)
-        self.pin = self.ref.get().to_dict()['pin']
-        self.last_unlock_time = None
-
-        print('MAILBOX', id, fields, 'PIN', self.pin)
+        self.ref = service.db.collection(u'mailboxes').document(id)
+        self.watch = self.ref.on_snapshot(self.on_mailbox_snapshot)
 
         self.messages_ref = self.ref.collection('messages')
         self.messages_watch = self.messages_ref.where(u'unread', '==', True).on_snapshot(self.on_messages_snapshot)
-
         self.messages = []
 
+        self.recorded = None
+        self.last_unlock_time = None
+
+        self.stop_thread = False
+        self.thread = threading.Thread(None, self.run)
+        self.thread.start()
+
     def __del__(self):
+        logging.info(f'CLOSE {self.mailbox_id}')
+        self.watch.unsubscribe()
         self.messages_watch.unsubscribe()
+        self.stop_thread = True
+        self.thread.join()
 
     def on_messages_snapshot(self, snaps, changes, read_time):
-        print('MESSAGES', self.mailbox_id, len(snaps))
+        logging.info(f'MESSAGES {self.mailbox_id} {len(snaps)}')
         self.messages = snaps
+
+    def on_mailbox_snapshot(self, snaps, changes, read_time):
+        fields = changes[0].document.to_dict()
+        logging.info(f'MAILBOX_SNAPSHOT {self.mailbox_id} {fields}')
+        self.pin = fields['pin']
+
+    def still_unlocked(self):
+        if self.last_unlock_time is not None:
+            time_since_last_unlock = time.time() - self.last_unlock_time
+            if time_since_last_unlock < 20:
+                return True
+        return False
+
+    def check_pin(self):
+        logging.info(f'CHECK_PIN {self.mailbox_id} {self.pin}')
+        service.pixels[self.led_index] = (0, 0, 128)
+
+        pin = 's'
+        while True:
+            logging.info(f'PIN {pin}')
+            if pin == self.pin:
+                self.last_unlock_time = time.time()
+                return True
+
+            start = time.time()
+            while not self.button.is_pressed:
+                now = time.time()
+                if now - start > 2.0:
+                    return False
+                wait()
+
+            start = time.time()
+            press_time = 0
+            while self.button.is_pressed:
+                wait()
+
+            press_time = time.time() - start
+
+            if press_time >= 0.5:
+                pin += 'l'
+            else:
+                pin += 's'
+
+    def playback_message(self):
+        logging.info(f'PLAYBACK {self.mailbox_id}')
+
+        if len(self.messages) == 0:
+            logging.info('EMPTY')
+            return
+
+        message = self.messages[0]
+        audio = message.get('audio_ref').get().to_dict()
+
+        data = zlib.decompress(audio['samples'])
+        path = f'/tmp/{self.mailbox_id}.wav' 
+        save_wav(path, data)
+        subprocess.run(f'sox --norm {path} {path}.sox.wav', shell=True, check=True)
+        subprocess.run(f'aplay {path}.sox.wav', shell=True, check=True)
+
+        self.messages_ref.document(message.id).update({
+            'unread': False,
+        })
+
+    def upload(self, data):
+        start = time.time()
+        logging.info(f'UPLOAD {self.mailbox_id}')
+
+        logging.info(f'A {time.time() - start}')
+
+        compressed = zlib.compress(data)
+        logging.info(f'COMPRESS {len(data)} -> {len(compressed)}')
+
+        logging.info(f'B {time.time() - start}')
+
+        #batch = service.db.batch()
+        logging.info(f'C {time.time() - start}')
+        
+        audio_ref = service.audio_collection.document()
+        logging.info(f'D {time.time() - start}')
+        message_ref = self.messages_ref.document()
+        logging.info(f'E {time.time() - start}')
+        #batch.set(audio_ref, {
+        audio_ref.set({
+            'timestamp': firestore.SERVER_TIMESTAMP,
+            'host': service.hostname,
+            'format': 'raw_s16le_22khz_mono',
+            'samples': compressed
+        })
+        logging.info(f'F {time.time() - start}')
+        #batch.set(message_ref, {
+        message_ref.set({
+            'timestamp': firestore.SERVER_TIMESTAMP,
+            'host': service.hostname,
+            'unread': True,
+            'audio_ref': audio_ref
+        })
+        logging.info(f'G {time.time() - start}')
+        #batch.commit()
+        logging.info(f'H {time.time() - start}')
+        
+        logging.info(f'UPLOAD_COMPLETE {self.mailbox_id} {time.time() - start}')
+
+    def send_message(self):
+        logging.info(f'RECORD {self.mailbox_id}')
+        service.pixels[self.led_index] = (255, 0, 0)
+
+        self.recorded = []
+        recorder.mailboxes.add(self)
+
+        while self.button.is_pressed:
+            wait()
+        time.sleep(0.5) # drain buffers
+
+        recorder.mailboxes.remove(self)
+
+        data = b''.join(self.recorded)
+        self.recorded = None
+
+        upload_thread = threading.Thread(target=self.upload, args=(data,))
+        upload_thread.start()
+
+        service.pixels[self.led_index] = (0, 0, 0)
+
+    def run(self):
+        logging.info(f'RUN {self.mailbox_id}')
+
+        while not self.stop_thread and not service.quit_requested:
+            if self.button.is_pressed:
+                logging.info(f'INITIATE {self.mailbox_id}')
+
+                start = time.time()
+                while self.button.is_pressed:
+                    now = time.time()
+                    if now - start > 0.5:
+                        break
+                
+                if self.button.is_pressed:
+                    logging.info('HELD')
+                    self.send_message()
+                
+                else:
+                    if self.check_pin():
+                        self.playback_message()
+
+                logging.info('FINISHED')
+            
+            else:
+                if len(self.messages) > 0:
+                    service.pixels[self.led_index] = (128, 128, 128)
+                else:
+                    service.pixels[self.led_index] = (0, 0, 0)
+            
+            wait()
+
+        logging.info(f'STOP {self.mailbox_id}')
 
 
 class MessageClient:
     def __init__(self):
-        self.hostname = platform.node()
         self.need_restart = False
         self.mailboxes = {}
 
-        self.ref = db.collection(u'hosts').document(self.hostname)
+        self.ref = service.db.collection(u'hosts').document(service.hostname)
         self.ref.collection('mailboxes').on_snapshot(self.on_mailboxes)
 
-        db.collection('global').document('version').on_snapshot(self.on_version)
+        service.db.collection('global').document('version').on_snapshot(self.on_version)
 
     def on_mailboxes(self, snap, changes, read_time):
         for change in changes:
@@ -81,164 +284,23 @@ class MessageClient:
 
     def on_version(self, snaps, changes, read_time):
         latest_version = snaps[0].get('version')
-        local_version = subprocess.check_output(DESCRIBE_CMD, shell=True).decode().strip()
-        print('LATEST_VERSION', latest_version, 'vs', local_version)
+        cmd = 'git describe --always'
+        local_version = subprocess.check_output(cmd, shell=True).decode().strip()
+        logging.info(f'LATEST_VERSION {latest_version} vs {local_version}')
 
         if latest_version != local_version:
-            print('OTA_UPGRADE', latest_version)
+            logging.info(f'OTA_UPGRADE {latest_version}')
             subprocess.run('git fetch', shell=True)
             subprocess.run(f'git checkout {latest_version}', shell=True)
             self.need_restart = True
 
-    def save_wav(self, wav_path, content):
-        w = wave.open(str(wav_path), 'wb')
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(16000)
-        w.writeframes(content)
-        w.close()
-        print('SAVED', wav_path)
 
-    def send_message(self, mailbox):
-        print('RECORD', mailbox.mailbox_id)
-        to_mailboxes = { mailbox }
-        pixels[mailbox.led_index] = (255, 0, 0)
+if __name__ == "__main__":
+    service = Service()
+    recorder = Recorder()
+    client = MessageClient()
 
-        record_process = subprocess.Popen(
-            RECORDING_CMD, shell=True, stdout=subprocess.PIPE)
+    while not client.need_restart:
+        time.sleep(1.0)
 
-        data = bytearray()
-
-        while True:
-            data.extend(record_process.stdout.read(1024 * 2))
-
-            for other_mailbox in list(self.mailboxes.values()):
-                if other_mailbox.button.is_pressed:
-                    if not other_mailbox in to_mailboxes:
-                        pixels[other_mailbox.led_index] = (255, 0, 0)
-                        to_mailboxes.add(other_mailbox)
-
-            if not mailbox.button.is_pressed:
-                break
-
-        for _ in range(4):
-            data.extend(record_process.stdout.read(1024 * 2))
-
-        record_process.terminate()
-
-        print('UPLOAD', mailbox.mailbox_id)
-        for to_mailbox in to_mailboxes:
-            pixels[to_mailbox.led_index] = (128, 128, 0)
-
-        batch = db.batch()
-        
-        audio_ref = db.collection(u'audio').document()
-        batch.set(audio_ref, {
-            'timestamp': firestore.SERVER_TIMESTAMP,
-            'host': self.hostname,
-            'format': 'raw_s16le_22khz_mono',
-            'samples': bytes(data)
-        })
-        
-        for to_mailbox in to_mailboxes:
-            message_ref = db.collection(u'mailboxes').document(to_mailbox.mailbox_id).collection('messages').document()
-            batch.set(message_ref, {
-                'timestamp': firestore.SERVER_TIMESTAMP,
-                'host': self.hostname,
-                'unread': True,
-                'audio_ref': audio_ref
-            })
-
-        batch.commit()
-
-        for to_mailbox in to_mailboxes:
-            pixels[to_mailbox.led_index] = (0, 0, 0)
-
-    def playback_message(self, mailbox):
-        print('PLAYBACK', mailbox.mailbox_id)
-
-        if len(mailbox.messages) == 0:
-            print('EMPTY')
-            return
-
-        message = mailbox.messages[0]
-        audio = message.get('audio_ref').get().to_dict()
-
-        self.save_wav('/tmp/audio.wav', audio['samples'])
-        subprocess.run(NORMALIZE_CMD, shell=True, check=True)
-        subprocess.run(PLAYBACK_CMD, shell=True, check=True)
-
-        mailbox.messages_ref.document(message.id).update({
-            'unread': False,
-        })
-
-    def check_pin(self, mailbox):
-        print('CHECK_PIN', mailbox.mailbox_id, mailbox.pin)
-        pixels[mailbox.led_index] = (0, 0, 128)
-
-        if mailbox.last_unlock_time is not None:
-            time_since_last_unlock = time.time() - mailbox.last_unlock_time
-            if time_since_last_unlock < 60:
-                print('STILL_UNLOCKED')
-                return True
-
-        pin = 's'
-        while True:
-            start = time.time()
-            while not mailbox.button.is_pressed:
-                now = time.time()
-                if now - start > 2.0:
-                    return False
-
-            start = time.time()
-            press_time = 0
-            while mailbox.button.is_pressed:
-                press_time = time.time() - start
-
-            if press_time >= 0.5:
-                pin += 'l'
-            else:
-                pin += 's'
-            
-            print('PIN', pin)
-            if pin == mailbox.pin:
-                mailbox.last_unlock_time = time.time()
-                return True
-
-    def serve(self):
-        print('SERVE')
-
-        while True:
-            for mailbox in list(self.mailboxes.values()):
-                if mailbox.button.is_pressed:
-                    print('INITIATE', mailbox.mailbox_id)
-
-                    start = time.time()
-                    while mailbox.button.is_pressed:
-                        now = time.time()
-                        if now - start > 0.2:
-                            break
-                    
-                    if mailbox.button.is_pressed:
-                        print('HELD')
-                        self.send_message(mailbox)
-                    
-                    else:
-                        if self.check_pin(mailbox):
-                            self.playback_message(mailbox)
-
-                    print('FINISHED')
-                
-                else:
-                    if len(mailbox.messages) > 0:
-                        pixels[mailbox.led_index] = (128, 128, 128)
-                    else:
-                        pixels[mailbox.led_index] = (0, 0, 0)
-
-            if self.need_restart:
-                print('RESTART')
-                break
-
-
-client = MessageClient()
-client.serve()
+    service.quit_requested = True
