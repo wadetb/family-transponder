@@ -11,6 +11,7 @@ import zlib
 import board
 from gpiozero import Button
 import neopixel
+import pygame as pg
 
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -45,6 +46,8 @@ class Service:
 
         self.pixels = neopixel.NeoPixel(board.D12, 20)
         self.buttons = {}
+
+        pg.mixer.init(16000, -16, 1, 4096)
 
         self.hostname = platform.node()
         self.quit_requested = False
@@ -158,11 +161,16 @@ class Mailbox:
         message = self.messages[0]
         audio = message.get('audio_ref').get().to_dict()
 
-        data = zlib.decompress(audio['samples'])
-        path = f'/tmp/{self.mailbox_id}.wav' 
-        save_wav(path, data)
-        subprocess.run(f'sox --norm {path} {path}.sox.wav', shell=True, check=True)
-        subprocess.run(f'aplay {path}.sox.wav', shell=True, check=True)
+        #data = zlib.decompress(audio['samples'])
+        data = audio['samples']
+
+        #path = f'/tmp/{self.mailbox_id}.wav' 
+        #save_wav(path, data)
+        #subprocess.run(f'sox --norm {path} {path}.sox.wav', shell=True, check=True)
+        #subprocess.run(f'aplay -Dplug:dmix {path}.sox.wav', shell=True, check=True)
+        sound = pg.mixer.Sound(data)
+        #sound = pg.sndarray.make_sound(data) # needs decoding
+        sound.play()
 
         self.messages_ref.document(message.id).update({
             'unread': False,
@@ -174,7 +182,9 @@ class Mailbox:
 
         logging.info(f'A {time.time() - start}')
 
-        compressed = zlib.compress(data)
+        #compressed = zlib.compress(data)
+        compressed = data
+
         logging.info(f'COMPRESS {len(data)} -> {len(compressed)}')
 
         logging.info(f'B {time.time() - start}')
@@ -275,7 +285,8 @@ class MessageClient:
     def on_mailboxes(self, snap, changes, read_time):
         for change in changes:
             if change.type.name == 'ADDED':
-                self.mailboxes[change.document.id] = Mailbox(change.document.id, change.document.to_dict())
+                #if change.document.id in ['simon']:
+                    self.mailboxes[change.document.id] = Mailbox(change.document.id, change.document.to_dict())
             elif change.type.name == 'MODIFIED':
                 del self.mailboxes[change.document.id]
                 self.mailboxes[change.document.id] = Mailbox(change.document.id, change.document.to_dict())
