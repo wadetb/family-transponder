@@ -1,8 +1,9 @@
 #!/usr/bin/python3
+import datetime
 import logging
+import os
 import platform
 import subprocess
-import sys
 import threading
 import time
 import wave
@@ -12,6 +13,7 @@ import board
 from gpiozero import Button
 import neopixel
 import pygame as pg
+#import yappi
 
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -44,13 +46,22 @@ class Service:
         subprocess.run("touch blink_stop", shell=True, check=True)
         time.sleep(1)
 
-        self.pixels = neopixel.NeoPixel(board.D12, 20)
+        if os.geteuid() == 0:
+            self.pixels = neopixel.NeoPixel(board.D12, 20)
+        else:
+            logging.warning('Not running as root, NeoPixels disabled')
+            self.pixels = None # root access required
+            
         self.buttons = {}
 
-        pg.mixer.init(16000, -16, 1, 4096)
+        pg.mixer.init(16000, -16, 1, 65536)
 
         self.hostname = platform.node()
         self.quit_requested = False
+
+    def set_pixel(self, index, color):
+        if self.pixels is not None:
+            self.pixels[index] = color
 
 
 class Recorder:
@@ -108,6 +119,7 @@ class Mailbox:
     def on_messages_snapshot(self, snaps, changes, read_time):
         logging.info(f'MESSAGES {self.mailbox_id} {len(snaps)}')
         self.messages = snaps
+        self.set_led()
 
     def on_mailbox_snapshot(self, snaps, changes, read_time):
         fields = changes[0].document.to_dict()
@@ -123,7 +135,7 @@ class Mailbox:
 
     def check_pin(self):
         logging.info(f'CHECK_PIN {self.mailbox_id} {self.pin}')
-        service.pixels[self.led_index] = (0, 0, 128)
+        service.set_pixel(self.led_index, (0, 0, 128))
 
         pin = 's'
         while True:
@@ -161,8 +173,10 @@ class Mailbox:
         message = self.messages[0]
         audio = message.get('audio_ref').get().to_dict()
 
-        #data = zlib.decompress(audio['samples'])
-        data = audio['samples']
+        if audio['format'].contains('zlib'):
+            data = zlib.decompress(audio['samples'])
+        else:
+            data = audio['samples']
 
         #path = f'/tmp/{self.mailbox_id}.wav' 
         #save_wav(path, data)
@@ -178,48 +192,44 @@ class Mailbox:
 
     def upload(self, data):
         start = time.time()
+        #yappi.start()
         logging.info(f'UPLOAD {self.mailbox_id}')
-
-        logging.info(f'A {time.time() - start}')
 
         #compressed = zlib.compress(data)
         compressed = data
 
         logging.info(f'COMPRESS {len(data)} -> {len(compressed)}')
 
-        logging.info(f'B {time.time() - start}')
-
-        #batch = service.db.batch()
-        logging.info(f'C {time.time() - start}')
+        batch = service.db.batch()
         
+        timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
         audio_ref = service.audio_collection.document()
-        logging.info(f'D {time.time() - start}')
         message_ref = self.messages_ref.document()
-        logging.info(f'E {time.time() - start}')
-        #batch.set(audio_ref, {
-        audio_ref.set({
-            'timestamp': firestore.SERVER_TIMESTAMP,
+
+        batch.set(audio_ref, {
+            'timestamp': timestamp, #firestore.SERVER_TIMESTAMP,
             'host': service.hostname,
-            'format': 'raw_s16le_22khz_mono',
+            'format': 'raw_s16le_16100_mono',
             'samples': compressed
         })
-        logging.info(f'F {time.time() - start}')
-        #batch.set(message_ref, {
-        message_ref.set({
-            'timestamp': firestore.SERVER_TIMESTAMP,
+        batch.set(message_ref, {
+            'timestamp': timestamp, #firestore.SERVER_TIMESTAMP,
             'host': service.hostname,
             'unread': True,
             'audio_ref': audio_ref
         })
-        logging.info(f'G {time.time() - start}')
-        #batch.commit()
-        logging.info(f'H {time.time() - start}')
+        
+        batch.commit()
         
         logging.info(f'UPLOAD_COMPLETE {self.mailbox_id} {time.time() - start}')
+        #yappi.stop()
+        #yappi.get_func_stats().print_all()
+        #yappi.get_func_stats().save('upload.callgrind', type='callgrind')
 
     def send_message(self):
         logging.info(f'RECORD {self.mailbox_id}')
-        service.pixels[self.led_index] = (255, 0, 0)
+        service.set_pixel(self.led_index, (255, 0, 0))
 
         self.recorded = []
         recorder.mailboxes.add(self)
@@ -235,8 +245,6 @@ class Mailbox:
 
         upload_thread = threading.Thread(target=self.upload, args=(data,))
         upload_thread.start()
-
-        service.pixels[self.led_index] = (0, 0, 0)
 
     def run(self):
         logging.info(f'RUN {self.mailbox_id}')
@@ -254,22 +262,24 @@ class Mailbox:
                 if self.button.is_pressed:
                     logging.info('HELD')
                     self.send_message()
+                    self.set_led()
                 
                 else:
                     if self.check_pin():
                         self.playback_message()
+                    self.set_led()
 
                 logging.info('FINISHED')
-            
-            else:
-                if len(self.messages) > 0:
-                    service.pixels[self.led_index] = (128, 128, 128)
-                else:
-                    service.pixels[self.led_index] = (0, 0, 0)
             
             wait()
 
         logging.info(f'STOP {self.mailbox_id}')
+
+    def set_led(self):
+        if len(self.messages) > 0:
+            service.set_pixel(self.led_index, (128, 128, 128))
+        else:
+            service.set_pixel(self.led_index, (0, 0, 0))
 
 
 class MessageClient:
@@ -285,7 +295,7 @@ class MessageClient:
     def on_mailboxes(self, snap, changes, read_time):
         for change in changes:
             if change.type.name == 'ADDED':
-                #if change.document.id in ['simon']:
+                # if change.document.id in ['simon']:
                     self.mailboxes[change.document.id] = Mailbox(change.document.id, change.document.to_dict())
             elif change.type.name == 'MODIFIED':
                 del self.mailboxes[change.document.id]

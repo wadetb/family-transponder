@@ -6,19 +6,20 @@ if [[ "$USER" -ne "pi" ]]
   exit
 fi
 
-cd /home/pi/ft
+SERVICE_PATH=/home/pi/ft
+SERVICE_PYTHON="sudo $SERVICE_PATH/ft-venv/bin/python3"
 
-sudo /usr/bin/python3 -u blink.py &
+cd $SERVICE_PATH
+
+$SERVICE_PYTHON -u blink.py &
 
 while ! systemctl --no-pager status network-online.target; do
     sleep 1
 done
 
-cd /home/pi/ft
-
 if [ ! -f init_python_libs ]; then
     touch init_python_libs
-    sudo python3 -m pip install gpiozero firebase_admin rpi_ws281x adafruit-circuitpython-neopixel
+    $SERVICE_PYTHON -m pip install gpiozero firebase_admin google-cloud-firestore rpi_ws281x adafruit-circuitpython-neopixel pygame
 fi
 
-sudo /usr/bin/python3 -u main.py
+$SERVICE_PYTHON -u main.py

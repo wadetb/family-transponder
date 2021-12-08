@@ -1,3 +1,6 @@
 init_*
 blink_*
+*.callgrind
 *.json
+.vscode/
+ft-venv/
