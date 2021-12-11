@@ -23,4 +23,4 @@ if [ ! -f init_python_libs ]; then
     $SERVICE_PYTHON -m pip install gpiozero firebase_admin google-cloud-firestore rpi_ws281x adafruit-circuitpython-neopixel pygame numpy sox
 fi
 
-$SERVICE_PYTHON -u main.py
+$SERVICE_PYTHON -u ft.py
