@@ -12,24 +12,30 @@ import zlib
 import board
 from gpiozero import Button
 import neopixel
+import numpy as np
 import pygame as pg
+import sox
 #import yappi
 
 import firebase_admin
 from firebase_admin import credentials, firestore
 
+
+SAMPLE_RATE = 22050
+
+
 def wait():
     time.sleep(0.1)
 
 
-# def save_wav(wav_path, content):
-#     w = wave.open(str(wav_path), 'wb')
-#     w.setnchannels(1)
-#     w.setsampwidth(2)
-#     w.setframerate(16000)
-#     w.writeframes(content)
-#     w.close()
-#     logging.info(f'SAVED {wav_path}')
+def save_wav(wav_path, content):
+    w = wave.open(str(wav_path), 'wb')
+    w.setnchannels(1)
+    w.setsampwidth(2)
+    w.setframerate(SAMPLE_RATE)
+    w.writeframes(content)
+    w.close()
+    logging.info(f'SAVED {wav_path}')
 
 
 class Service:
@@ -43,6 +49,13 @@ class Service:
         self.db = firestore.client()
         self.audio_collection = self.db.collection(u'audio')
 
+        self.buttons = {}
+
+        pg.mixer.init(SAMPLE_RATE, -16, 1, 65536)
+
+        self.hostname = platform.node()
+        self.quit_requested = False
+
         subprocess.run("touch blink_stop", shell=True, check=True)
         time.sleep(1)
 
@@ -50,14 +63,7 @@ class Service:
             self.pixels = neopixel.NeoPixel(board.D12, 20)
         else:
             logging.warning('Not running as root, NeoPixels disabled')
-            self.pixels = None # root access required
-            
-        self.buttons = {}
-
-        pg.mixer.init(16000, -16, 1, 65536)
-
-        self.hostname = platform.node()
-        self.quit_requested = False
+            self.pixels = None # root access required           
 
     def set_pixel(self, index, color):
         if self.pixels is not None:
@@ -72,7 +78,7 @@ class Recorder:
         self.thread.start()
 
     def run(self):
-        cmd = 'arecord -D plughw:1,0 --channels 1 --format S16_LE --rate 16000 --buffer-size 4096 --file-type raw'
+        cmd = f'arecord -D plughw:1,0 --channels 1 --format S16_LE --rate {SAMPLE_RATE} --buffer-size 4096 --file-type raw'
 
         record_process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE)
 
@@ -178,13 +184,21 @@ class Mailbox:
 #            data = zlib.decompress(audio['samples'])
 #        else:
         data = audio['samples']
+        samples = np.frombuffer(data, np.int16)
+        # save_wav(f'/tmp/{self.mailbox_id}.wav', data)
 
-        #path = f'/tmp/{self.mailbox_id}.wav' 
-        #save_wav(path, data)
-        #subprocess.run(f'sox --norm {path} {path}.sox.wav', shell=True, check=True)
-        #subprocess.run(f'aplay -Dplug:dmix {path}.sox.wav', shell=True, check=True)
-        sound = pg.mixer.Sound(data)
-        #sound = pg.sndarray.make_sound(data) # needs decoding
+        tfm = sox.Transformer()
+        # noise_path = f'/tmp/{self.mailbox_id}.noise.wav'
+        # noiseprof_path = f'/tmp/{self.mailbox_id}.noiseprof'
+        # noise_data = data[:int(SAMPLE_RATE/4) * 2]
+        # save_wav(noise_path, noise_data)
+        # tfm.noiseprof(noise_path, noiseprof_path)
+        # tfm.noisered('ft.noiseprof', amount=0.2)
+        tfm.norm(-8)
+        samples = tfm.build_array(input_array=samples, sample_rate_in=SAMPLE_RATE)
+
+        samples = samples.astype(np.int16)
+        sound = pg.sndarray.make_sound(samples)
         sound.play()
 
         self.messages_ref.document(message.id).update({
@@ -213,7 +227,7 @@ class Mailbox:
         batch.set(audio_ref, {
             'timestamp': timestamp, #firestore.SERVER_TIMESTAMP,
             'host': service.hostname,
-            'format': 'raw_s16le_16100_mono',
+            'format': f'raw_s16le_{SAMPLE_RATE}_mono',
             'samples': compressed
         })
         batch.set(message_ref, {
@@ -239,7 +253,7 @@ class Mailbox:
 
         while self.button.is_pressed:
             wait()
-        time.sleep(0.5) # drain buffers
+        time.sleep(0.25) # drain buffers
 
         recorder.mailboxes.remove(self)
 
@@ -269,6 +283,7 @@ class Mailbox:
                         logging.info(f'HELD {hold_duration}')
                         self.send_message()
                         self.set_led()
+                        hold_start = None
 
             else:
                 if hold_start is not None:
@@ -276,7 +291,6 @@ class Mailbox:
                         self.playback_message()
                     self.set_led()
                 hold_start = None
-
             
             wait()
 

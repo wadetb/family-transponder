@@ -19,7 +19,8 @@ done
 
 if [ ! -f init_python_libs ]; then
     touch init_python_libs
-    $SERVICE_PYTHON -m pip install gpiozero firebase_admin google-cloud-firestore rpi_ws281x adafruit-circuitpython-neopixel pygame
+    sudo apt install libatlas-base-dev
+    $SERVICE_PYTHON -m pip install gpiozero firebase_admin google-cloud-firestore rpi_ws281x adafruit-circuitpython-neopixel pygame numpy sox
 fi
 
 $SERVICE_PYTHON -u main.py
