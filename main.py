@@ -22,14 +22,14 @@ def wait():
     time.sleep(0.1)
 
 
-def save_wav(wav_path, content):
-    w = wave.open(str(wav_path), 'wb')
-    w.setnchannels(1)
-    w.setsampwidth(2)
-    w.setframerate(16000)
-    w.writeframes(content)
-    w.close()
-    logging.info(f'SAVED {wav_path}')
+# def save_wav(wav_path, content):
+#     w = wave.open(str(wav_path), 'wb')
+#     w.setnchannels(1)
+#     w.setsampwidth(2)
+#     w.setframerate(16000)
+#     w.writeframes(content)
+#     w.close()
+#     logging.info(f'SAVED {wav_path}')
 
 
 class Service:
@@ -89,6 +89,7 @@ class Mailbox:
 
         self.mailbox_id = id
         self.led_index = fields['led_index']
+        self.pin = 's'
 
         button_pin = fields['button_pin']
         if not button_pin in service.buttons:
@@ -173,10 +174,10 @@ class Mailbox:
         message = self.messages[0]
         audio = message.get('audio_ref').get().to_dict()
 
-        if audio['format'].contains('zlib'):
-            data = zlib.decompress(audio['samples'])
-        else:
-            data = audio['samples']
+#        if audio['format'].contains('zlib'):
+#            data = zlib.decompress(audio['samples'])
+#        else:
+        data = audio['samples']
 
         #path = f'/tmp/{self.mailbox_id}.wav' 
         #save_wav(path, data)
@@ -189,6 +190,8 @@ class Mailbox:
         self.messages_ref.document(message.id).update({
             'unread': False,
         })
+
+        time.sleep(sound.get_length())
 
     def upload(self, data):
         start = time.time()
@@ -249,27 +252,31 @@ class Mailbox:
     def run(self):
         logging.info(f'RUN {self.mailbox_id}')
 
-        while not self.stop_thread and not service.quit_requested:
-            if self.button.is_pressed:
-                logging.info(f'INITIATE {self.mailbox_id}')
+        hold_start = None
 
-                start = time.time()
-                while self.button.is_pressed:
-                    now = time.time()
-                    if now - start > 0.5:
-                        break
-                
-                if self.button.is_pressed:
-                    logging.info('HELD')
-                    self.send_message()
-                    self.set_led()
-                
+        while not self.stop_thread and not service.quit_requested:
+
+            button_pressed = self.button.is_pressed
+
+            if button_pressed:
+                if hold_start is None:
+                    logging.info(f'BUTTON {self.mailbox_id}')
+                    hold_start = time.time()
+
                 else:
+                    hold_duration = time.time() - hold_start
+                    if hold_duration > 0.5:
+                        logging.info(f'HELD {hold_duration}')
+                        self.send_message()
+                        self.set_led()
+
+            else:
+                if hold_start is not None:
                     if self.check_pin():
                         self.playback_message()
                     self.set_led()
+                hold_start = None
 
-                logging.info('FINISHED')
             
             wait()
 
