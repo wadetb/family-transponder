@@ -194,7 +194,7 @@ class Mailbox:
         # save_wav(noise_path, noise_data)
         # tfm.noiseprof(noise_path, noiseprof_path)
         # tfm.noisered('ft.noiseprof', amount=0.2)
-        tfm.norm(-8)
+        tfm.norm(client.gain)
         samples = tfm.build_array(input_array=samples, sample_rate_in=SAMPLE_RATE)
 
         samples = samples.astype(np.int16)
@@ -306,12 +306,21 @@ class Mailbox:
 class MessageClient:
     def __init__(self):
         self.need_restart = False
+
+        self.gain = 0
         self.mailboxes = {}
 
         self.ref = service.db.collection(u'hosts').document(service.hostname)
+        self.ref.on_snapshot(self.on_snapshot)
+
         self.ref.collection('mailboxes').on_snapshot(self.on_mailboxes)
 
         service.db.collection('global').document('version').on_snapshot(self.on_version)
+
+    def on_snapshot(self, snap, changes, read_tinme):
+        fields = changes[0].document.to_dict()
+        logging.info(f'MAILBOX_SNAPSHOT {fields}')
+        self.gain = fields['gain']
 
     def on_mailboxes(self, snap, changes, read_time):
         for change in changes:
