@@ -151,6 +151,7 @@ class Mailbox:
                 self.last_unlock_time = time.time()
                 return True
 
+            service.set_pixel(self.led_index, (64, 64, 0))
             start = time.time()
             while not self.button.is_pressed:
                 now = time.time()
@@ -158,6 +159,7 @@ class Mailbox:
                     return False
                 wait()
 
+            service.set_pixel(self.led_index, (0, 64, 64))
             start = time.time()
             press_time = 0
             while self.button.is_pressed:
@@ -171,6 +173,7 @@ class Mailbox:
                 pin += 's'
 
     def playback_message(self):
+        start = time.time()
         logging.info(f'PLAYBACK {self.mailbox_id}')
 
         if len(self.messages) == 0:
@@ -179,21 +182,9 @@ class Mailbox:
 
         message = self.messages[0]
         audio = message.get('audio_ref').get().to_dict()
-
-#        if audio['format'].contains('zlib'):
-#            data = zlib.decompress(audio['samples'])
-#        else:
-        data = audio['samples']
-        samples = np.frombuffer(data, np.int16)
-        # save_wav(f'/tmp/{self.mailbox_id}.wav', data)
+        samples = np.frombuffer(audio['samples'], np.int16)
 
         tfm = sox.Transformer()
-        # noise_path = f'/tmp/{self.mailbox_id}.noise.wav'
-        # noiseprof_path = f'/tmp/{self.mailbox_id}.noiseprof'
-        # noise_data = data[:int(SAMPLE_RATE/4) * 2]
-        # save_wav(noise_path, noise_data)
-        # tfm.noiseprof(noise_path, noiseprof_path)
-        # tfm.noisered('ft.noiseprof', amount=0.2)
         tfm.norm(client.gain)
         samples = tfm.build_array(input_array=samples, sample_rate_in=SAMPLE_RATE)
 
@@ -206,43 +197,50 @@ class Mailbox:
         })
 
         time.sleep(sound.get_length())
+        service.set_pixel(self.led_index, (0, 0, 0))
+
+        logging.info(f'PLAYBACK_COMPLETE {self.mailbox_id} {time.time() - start}')
 
     def upload(self, data):
         start = time.time()
-        #yappi.start()
         logging.info(f'UPLOAD {self.mailbox_id}')
 
-        #compressed = zlib.compress(data)
-        compressed = data
+        # GRPC message size limit or 10s
+        DATA_LIMIT = min(512 * 1024, SAMPLE_RATE * 10)
 
-        logging.info(f'COMPRESS {len(data)} -> {len(compressed)}')
+        samples = data
+        while len(samples) > 0:
+            next_samples, samples = samples[DATA_LIMIT:], samples[:DATA_LIMIT]
 
-        batch = service.db.batch()
+            logging.info(f'UPLOAD_SAMPLES {self.mailbox_id} {len(samples)}')
+
+            batch = service.db.batch()
+
+            # CAUTION: firestore.SERVER_TIMESTAMP triggers multi-second CPU spikes in the
+            # Python gRPC code.
+            timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+            audio_ref = service.audio_collection.document()
+            message_ref = self.messages_ref.document()
+
+            batch.set(audio_ref, {
+                'timestamp': timestamp, #firestore.SERVER_TIMESTAMP,
+                'host': service.hostname,
+                'format': f'raw_s16le_{SAMPLE_RATE}_mono',
+                'samples': samples
+            })
+            batch.set(message_ref, {
+                'timestamp': timestamp, #firestore.SERVER_TIMESTAMP,
+                'host': service.hostname,
+                'unread': True,
+                'audio_ref': audio_ref
+            })
+            
+            batch.commit()
         
-        timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            samples = next_samples
 
-        audio_ref = service.audio_collection.document()
-        message_ref = self.messages_ref.document()
-
-        batch.set(audio_ref, {
-            'timestamp': timestamp, #firestore.SERVER_TIMESTAMP,
-            'host': service.hostname,
-            'format': f'raw_s16le_{SAMPLE_RATE}_mono',
-            'samples': compressed
-        })
-        batch.set(message_ref, {
-            'timestamp': timestamp, #firestore.SERVER_TIMESTAMP,
-            'host': service.hostname,
-            'unread': True,
-            'audio_ref': audio_ref
-        })
-        
-        batch.commit()
-        
         logging.info(f'UPLOAD_COMPLETE {self.mailbox_id} {time.time() - start}')
-        #yappi.stop()
-        #yappi.get_func_stats().print_all()
-        #yappi.get_func_stats().save('upload.callgrind', type='callgrind')
 
     def send_message(self):
         logging.info(f'RECORD {self.mailbox_id}')
@@ -253,7 +251,7 @@ class Mailbox:
 
         while self.button.is_pressed:
             wait()
-        time.sleep(0.25) # drain buffers
+        time.sleep(0.75) # drain buffers
 
         recorder.mailboxes.remove(self)
 
@@ -275,11 +273,12 @@ class Mailbox:
             if button_pressed:
                 if hold_start is None:
                     logging.info(f'BUTTON {self.mailbox_id}')
+                    service.set_pixel(self.led_index, (0, 0, 128))
                     hold_start = time.time()
 
                 else:
                     hold_duration = time.time() - hold_start
-                    if hold_duration > 0.5:
+                    if hold_duration > 0.25:
                         logging.info(f'HELD {hold_duration}')
                         self.send_message()
                         self.set_led()
