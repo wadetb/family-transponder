@@ -286,7 +286,7 @@ class Mailbox:
 
             else:
                 if hold_start is not None:
-                    if self.check_pin():
+                    if self.still_unlocked() or self.check_pin():
                         self.playback_message()
                     self.set_led()
                 hold_start = None
